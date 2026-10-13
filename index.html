@@ -286,6 +286,117 @@
             "&cust_params=mid%3D" + mediaId + "%26uis%3Dfalse%26app_source%3Drecord_nam";
     }
 
+    function setupYoutube(hostElement, vastUrl) {
+        var frameId = 'frame-' + containerId;
+        var fill = 'position:absolute; top:0; left:0; width:100%; height:100%;';
+
+        hostElement.innerHTML =
+            '<iframe id="' + frameId + '" src="' + mediaSrc + '" style="' + fill + ' border:0;" ' +
+                'allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>' +
+            '<div id="cover-' + containerId + '" style="' + fill + ' z-index:2; cursor:pointer; background:rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;">' +
+                '<div style="width:72px; height:72px; border-radius:50%; background:rgba(255,255,255,.92); display:flex; align-items:center; justify-content:center;">' +
+                    '<div style="width:0; height:0; margin-left:6px; border-style:solid; border-width:14px 0 14px 24px; border-color:transparent transparent transparent #111;"></div>' +
+                '</div>' +
+            '</div>' +
+            '<div id="ad-' + containerId + '" style="' + fill + ' z-index:3; display:none; background:#000;"></div>' +
+            '<video id="content-' + containerId + '" style="display:none;" playsinline></video>';
+
+        var cover = document.getElementById('cover-' + containerId);
+        var adContainer = document.getElementById('ad-' + containerId);
+        var contentVideo = document.getElementById('content-' + containerId);
+
+        var adDisplayContainer = new google.ima.AdDisplayContainer(adContainer, contentVideo);
+        var adsLoader = new google.ima.AdsLoader(adDisplayContainer);
+        var adsManager = null;
+        var finished = false;
+
+        // Controla o YouTube via IFrame API (postMessage, requer enablejsapi=1)
+        function ytCommand(func) {
+            var f = document.getElementById(frameId);
+            if (f && f.contentWindow) {
+                f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: func, args: [] }), '*');
+            }
+        }
+
+        function resumeContent(reason) {
+            var why = (typeof reason === 'string') ? reason : ((reason && reason.type) || 'desconhecido');
+            console.log('[IMA] resumeContent | motivo=' + why + (finished ? ' (ignorado, ja finalizado)' : ''));
+            if (finished) return;
+            finished = true;
+            if (adsManager) { try { adsManager.destroy(); } catch (e) {} }
+            adContainer.style.display = 'none';
+            cover.style.display = 'none';
+            ytCommand('playVideo');
+        }
+
+        function onAdError(e) {
+            var err = e && e.getError ? e.getError() : null;
+            var code = err ? err.getErrorCode() : 'n/a';
+            var msg = err ? err.getMessage() : 'erro desconhecido';
+            console.error('[IMA] AD_ERROR codigo=' + code + ' | ' + msg);
+            if (!finished) {
+                var note = document.createElement('div');
+                note.style.cssText = 'position:absolute; left:8px; bottom:8px; z-index:4; background:rgba(0,0,0,.75); color:#fff; font:12px sans-serif; padding:4px 8px; border-radius:4px;';
+                note.textContent = 'Anuncio indisponivel (IMA ' + code + ')';
+                hostElement.appendChild(note);
+                setTimeout(function() { if (note.parentNode) note.parentNode.removeChild(note); }, 6000);
+            }
+            resumeContent();
+        }
+
+        adsLoader.addEventListener(google.ima.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, function(e) {
+            var settings = new google.ima.AdsRenderingSettings();
+            settings.restoreCustomPlaybackStateOnAdBreakComplete = true;
+            adsManager = e.getAdsManager(contentVideo, settings);
+
+            adsManager.addEventListener(google.ima.AdEvent.Type.CONTENT_PAUSE_REQUESTED, function() {
+                ytCommand('pauseVideo');
+                adContainer.style.display = 'block';
+            });
+            adsManager.addEventListener(google.ima.AdEvent.Type.CONTENT_RESUME_REQUESTED, resumeContent);
+            adsManager.addEventListener(google.ima.AdEvent.Type.ALL_ADS_COMPLETED, resumeContent);
+            adsManager.addEventListener(google.ima.AdErrorEvent.Type.AD_ERROR, onAdError);
+            adsManager.addEventListener(google.ima.AdEvent.Type.LOADED, function() { console.log('[IMA] anuncio carregado'); });
+            adsManager.addEventListener(google.ima.AdEvent.Type.STARTED, function() { console.log('[IMA] anuncio iniciado'); });
+
+            console.log('[IMA] adsManager criado');
+            Object.keys(google.ima.AdEvent.Type).forEach(function(k) {
+                adsManager.addEventListener(google.ima.AdEvent.Type[k], function(ev) { console.log('[IMA] evento: ' + ev.type); });
+            });
+
+            try {
+                adsManager.init(hostElement.clientWidth, hostElement.clientHeight, google.ima.ViewMode.NORMAL);
+                adsManager.start();
+            } catch (err) {
+                console.error('[IMA] excecao em init/start:', err);
+                resumeContent('excecao');
+            }
+        });
+        adsLoader.addEventListener(google.ima.AdErrorEvent.Type.AD_ERROR, onAdError);
+
+        window.addEventListener('resize', function() {
+            if (adsManager && !finished) {
+                adsManager.resize(hostElement.clientWidth, hostElement.clientHeight, google.ima.ViewMode.NORMAL);
+            }
+        });
+
+        // O anuncio e solicitado no clique (vpa=click): o gesto do usuario libera audio/autoplay
+        cover.addEventListener('click', function() {
+            cover.style.display = 'none';
+            adContainer.style.display = 'block';
+            adDisplayContainer.initialize();
+
+            console.log('[IMA] pedindo anuncio: ' + vastUrl);
+            var req = new google.ima.AdsRequest();
+            req.adTagUrl = vastUrl;
+            req.linearAdSlotWidth = hostElement.clientWidth;
+            req.linearAdSlotHeight = hostElement.clientHeight;
+            req.setAdWillAutoPlay(false);
+            req.setAdWillPlayMuted(false);
+            adsLoader.requestAds(req);
+        });
+    }
+
     function setupEnvironment() {
         var hostElement = document.getElementById(containerId);
         if (!hostElement) return;
@@ -299,23 +410,7 @@
         var vastUrl = buildVastRequest();
 
         if (mediaFormat === 'youtube') {
-            hostElement.innerHTML = 
-                '<iframe id="frame-'+containerId+'" src="'+mediaSrc+'" style="position:absolute; top:0; left:0; width:100%; height:100%; border:0;" allowfullscreen></iframe>' +
-                '<video id="vjs-'+containerId+'" class="video-js vjs-default-skin" style="position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none;" playsinline controls></video>';
-            
-            var playerInstance = videojs('vjs-'+containerId, { controls: true, preload: 'auto' });
-            
-            playerInstance.ima({ id: 'vjs-'+containerId, adTagUrl: vastUrl });
-            
-            playerInstance.on('adsready', function() {
-                document.getElementById('vjs-'+containerId).style.pointerEvents = 'auto';
-            });
-            playerInstance.on('adend', function() {
-                document.getElementById('vjs-'+containerId).style.pointerEvents = 'none';
-            });
-            
-            playerInstance.ima.requestAds();
-            
+            setupYoutube(hostElement, vastUrl);
         } else {
             hostElement.innerHTML = '<video id="vjs-'+containerId+'" class="video-js vjs-default-skin vjs-big-play-centered" style="position:absolute; top:0; left:0; width:100%; height:100%;" controls playsinline><source src="'+mediaSrc+'" type="video/mp4"></video>';
             
@@ -339,7 +434,13 @@
         document.head.appendChild(link);
     }
 
-    if (typeof videojs === 'undefined') {
+    if (mediaFormat === 'youtube') {
+        if (window.google && window.google.ima) {
+            setupEnvironment();
+        } else {
+            injectScript('https://imasdk.googleapis.com/js/sdkloader/ima3.js', setupEnvironment);
+        }
+    } else if (typeof videojs === 'undefined') {
         injectStyle('https://vjs.zencdn.net/8.6.1/video-js.css');
         injectStyle('https://cdnjs.cloudflare.com/ajax/libs/videojs-ima/2.2.0/videojs.ima.css');
         
